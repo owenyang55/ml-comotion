@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import einops as eo
 import torch
 from torch import nn
+import torch.nn.functional as F
 
 from ..utils import helper, smpl_kinematics
 from . import backbones, layers
@@ -228,7 +229,8 @@ class CoMotionDetect(nn.Module):
         
         if pretrained:
             checkpoint = torch.load(PYTORCH_CHECKPOINT_PATH, weights_only=True)
-            self.load_state_dict(checkpoint)
+            # self.load_state_dict(checkpoint)
+            self.load_state_dict(checkpoint, strict=False) #加载预训练权重同时允许从头训练
 
     def _intrinsics_conditioning(self, feats, K, pooling=8, normalize_factor=1024):
         """Condition image features on pixel and world coordinate mapping.
@@ -273,7 +275,7 @@ class CoMotionDetect(nn.Module):
 
         return feats
 
-    @torch.inference_mode
+    @torch.inference_mode       #训练时去掉，使系统能进行梯度计算
     def forward(self, img, K) -> DetectionOutput:
         """Extract backbone features and detect poses.
 
@@ -295,6 +297,47 @@ class CoMotionDetect(nn.Module):
 
         # Get detections
         detections, feature_pyramid = self.detection_head(feats, K, return_feats=True)
+
+        #增加提取ReID特征功能
+        candidate_trans = detections['trans']
+
+        #匹配后续的2D投影
+        candidate_centers = candidate_trans.unsqueeze(2)
+        K_expended = K.unsqueeze(1).expand(-1, candidate_trans.shape[1], -1, -1)
+
+        #投影为2D坐标
+        candidate_2d_centers = helper.project_to_2d(K_expended, candidate_centers)
+        candidate_2d_centers = candidate_2d_centers.squeeze(2)
+
+        #归一化到[-1,1]
+        h,w = feats.shape[-2:]
+        pooling_factor = 8
+
+        #转换x,y坐标
+        grid_x = 2.0 * candidate_2d_centers[..., 0] / (w * pooling_factor) - 1.0
+        grid_y = 2.0 * candidate_2d_centers[..., 1] / (h * pooling_factor) - 1.0
+
+        grid = torch.stack([grid_x, grid_y], dim=-1).unsqueeze(2)
+
+        #6、在特征图中采样
+        point_features = F.grid_sample(feats, grid, mode='bilinear', padding_mode='zeros', align_corners=False)
+
+        #获取候选人数量以便恢复形状
+        num_candidates = point_features.shape[2]
+        #将输入调整为标准4D
+        reshaped_features = point_features.permute(0, 2, 1, 3).reshape(-1, self.feat_dim, 1, 1)
+
+        #送入ReID头中
+        pooled_reid_features = self.reid_head(reshaped_features)
+        #展平后送入全连接层
+        pooled_reid_features = pooled_reid_features.flatten(1)
+
+        #送入后线性映射到向量中
+        reid_embeddings = self.reid_fc(pooled_reid_features)
+
+        #恢复形状
+        final_reid_features = reid_embeddings.view(img.shape[0], num_candidates, -1)
+
         for k, v in detections.items():
             if k == "pose_embedding":
                 # Remap latent pose embedding to joint angles
