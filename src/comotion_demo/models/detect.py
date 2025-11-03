@@ -23,6 +23,7 @@ DetectionOutput = namedtuple(
         "delta_body_pose",
         "trans",
         "conf",
+        "reid_features",    #新增REID头
     ],
 )
 
@@ -190,6 +191,8 @@ class CoMotionDetect(nn.Module):
         self.image_backbone = backbones.initialize(cfg.backbone_choice)
         self.feat_dim = self.image_backbone.output_dim
 
+        reid_feature_dim = 256 # 定义ReID特征维度
+
         # Detection head
         # Output split: betas, pose embedding, root_orient, xy, z, scale, confidence
         output_split = [smpl_kinematics.BETA_DOF, cfg.pose_embed_dim, 3, 2, 1, 1, 1]
@@ -213,6 +216,16 @@ class CoMotionDetect(nn.Module):
             2 * cfg.hidden_dim,
         )
 
+
+        self.reid_head = nn.Sequential(
+            nn.Conv2d(self.feat_dim, 512, kernel_size=1), # 举例，可以调整
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True),
+            nn.AdaptiveAvgPool2d(1) # [B, C, 1, 1]
+        )
+        self.reid_fc = nn.Linear(512, reid_feature_dim)
+
+        
         if pretrained:
             checkpoint = torch.load(PYTORCH_CHECKPOINT_PATH, weights_only=True)
             self.load_state_dict(checkpoint)
