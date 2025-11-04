@@ -410,6 +410,7 @@ def decode_network_outputs(
         "pred_3d": pred_3d,  # (1, 1344, 27, 3)
         "pred_2d": pred_2d,  # (1, 1344, 27, 2)
         "conf": detect_out.conf,  # (1, 1344, 1)
+        "reid_features": detect_out.reid_features,  # (1,1344,256)
     }
 
     # Index into selected subset of detections, add singleton batch dimension
